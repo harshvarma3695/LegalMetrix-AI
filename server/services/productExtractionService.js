@@ -1,419 +1,853 @@
-function clean(value = "") {
-  return String(value)
-    .replace(/\s+/g, " ")
+const clean = (value = "") =>
+  String(value)
     .replace(/[|]+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
-}
 
-function linesOf(text = "") {
-  return String(text)
-    .split(/\r?\n/)
+const linesOf = (text = "") =>
+  String(text)
+    .replace(/\r/g, "\n")
+    .split("\n")
     .map(clean)
     .filter(Boolean);
-}
 
-function normalizeOCR(text = "") {
-  return String(text)
-    .replace(/[₹]/g, "Rs ")
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/\u00a0/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .trim();
-}
-
-function normalizeDigits(value = "") {
-  return String(value)
+const normalizeNumericText = (value = "") =>
+  clean(value)
     .replace(/[Oo]/g, "0")
-    .replace(/[Il]/g, "1")
-    .replace(/[Ss]/g, "5")
-    .replace(/[Bb]/g, "8");
-}
+    .replace(/[Il|]/g, "1")
+    .replace(/[Ss]/g, "5");
 
-function firstMatch(lines, patterns) {
-  for (const line of lines) {
-    for (const pattern of patterns) {
-      const match = line.match(pattern);
-      if (match) {
-        return clean(match[1] || match[0]);
+const unique = (items) => [...new Set(items.map(clean).filter(Boolean))];
+
+const contextAt = (lines, index, radius = 2) =>
+  lines
+    .slice(index, Math.min(lines.length, index + radius + 1))
+    .join(" ");
+
+const chooseMostFrequent = (items) => {
+  const values = unique(items);
+
+  if (!values.length) return "";
+
+  const counts = new Map();
+
+  for (const item of items) {
+    const value = clean(item);
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+
+  return [...counts.entries()].sort(
+    (a, b) => b[1] - a[1] || b[0].length - a[0].length
+  )[0][0];
+};
+
+const isNoise = (line = "") =>
+  /^(ingredients?|nutritional|nutrition|allergen|approximate values|per\s+(100\s*g|serve)|%rda|energy|protein|carbohydrate|total fat|saturated fat|trans fat|sodium|salt|sugar|marketed by|manufactured by|packed by|imported by|consumer care|customer care|call us|email|mrp|mfg|mfd|best before|use by|expiry|batch|lic|fssai|contains|may contain)/i.test(
+    line
+  ) ||
+  /\b(?:sector[- ]?\d|noida[- ]?\d{5,}|delhi[- ]?\d{5,})\b/i.test(line) ||
+  /\d{6,}/.test(line);
+
+const extractLabeledValue = (
+  lines,
+  labelRegex,
+  valueRegex,
+  radius = 2
+) => {
+  const candidates = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!labelRegex.test(lines[i])) continue;
+
+    const context = contextAt(lines, i, radius);
+
+    for (const match of context.matchAll(valueRegex)) {
+      if (match[1]) {
+        candidates.push(clean(match[1]));
       }
     }
   }
 
-  return "";
-}
+  return candidates;
+};
 
-function nearbyLine(lines, index) {
-  return [
-    lines[index - 1] || "",
-    lines[index] || "",
-    lines[index + 1] || "",
-    lines[index + 2] || "",
-  ]
-    .map(clean)
-    .filter(Boolean)
-    .join(" ");
-}
+/* ---------------- COMPANY ---------------- */
 
-/* -------------------------------------------------
-   MANUFACTURER / PACKER / IMPORTER
-------------------------------------------------- */
+const companyCandidate = (value = "") => {
+  const v = clean(value);
 
-function extractManufacturer(lines) {
-  const labelPatterns = [
-    /(?:manufactured|manufactured\s*by|manufactured\s*&\s*marketed\s*by)\s*[:\-]?\s*(.+)$/i,
-    /(?:manufactured\s+at|packed\s+by|packed\s+at)\s*[:\-]?\s*(.+)$/i,
-    /(?:manufacturer|manufacturer\/packer|manufacturer\s*\/\s*packer)\s*[:\-]?\s*(.+)$/i,
-    /(?:packer|packed\s+for)\s*[:\-]?\s*(.+)$/i,
-    /(?:importer|imported\s+by)\s*[:\-]?\s*(.+)$/i,
-  ];
+  if (!v || isNoise(v)) return "";
 
-  const value = firstMatch(lines, labelPatterns);
+  const companyWord =
+    /\b(?:private|pvt|limited|ltd|llp|industr(?:y|ies)|foods?|snacks?|enterprise|company|co\.)\b/i;
 
-  if (value) {
-    return value
-      .replace(/^(by|at|:|-)\s*/i, "")
-      .trim();
+  if (!companyWord.test(v) && !/haldiram/i.test(v)) {
+    return "";
   }
 
-  const companyCandidates = lines.filter((line) =>
-    /\b(private\s+limited|pvt\.?\s*ltd\.?|limited|ltd\.?|industries|foods?|food\s+products?|enterprises?|company|co\.?)\b/i.test(
-      line
-    )
+  if (/^(and|or|the|of|with|from|for)\b/i.test(v)) {
+    return "";
+  }
+
+  return v;
+};
+
+const extractCompany = (lines) => {
+  const candidates = [];
+
+  const label =
+    /\b(?:manufactured|manufactur|manufacture|marketed|packed|packer|imported|manufacturer)\b/i;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!label.test(lines[i])) continue;
+
+    const same = clean(
+      lines[i].replace(
+        /^.*?(manufactured|manufactur|manufacture|marketed|packed|packer|imported|manufacturer)\s*(?:by|at)?\s*[:\-.]?/i,
+        ""
+      )
+    );
+
+    const a = companyCandidate(same);
+
+    if (a) candidates.push(a);
+
+    for (const next of lines.slice(i + 1, i + 4)) {
+      const b = companyCandidate(next);
+
+      if (b) candidates.push(b);
+    }
+  }
+
+  for (const line of lines) {
+    if (
+      /ingredients?|nutritional|nutrition|allergen|trans fat|carbohydrate|total fat|saturated fat/i.test(
+        line
+      )
+    ) {
+      continue;
+    }
+
+    const privateIndex = line.search(
+      /\b(?:PRIVATE|PVT\.?|LIMITED|LTD\.?|LLP)\b/i
+    );
+
+    let companyPart = "";
+
+    if (privateIndex >= 0) {
+      const before = line
+        .slice(0, privateIndex)
+        .trim()
+        .split(/\s+/)
+        .slice(-5)
+        .join(" ");
+
+      const after = line
+        .slice(privateIndex)
+        .split(/\s+/)
+        .slice(0, 2)
+        .join(" ");
+
+      companyPart = clean(`${before} ${after}`);
+    }
+
+    const c = companyCandidate(companyPart || line);
+
+    if (c) candidates.push(c);
+  }
+
+  /*
+   OCR kabhi company ka first part drop kar deta hai.
+   Agar same OCR output me HALDIRAM observed hai,
+   to sirf observed company fragment ke saath combine karenge.
+  */
+  const hasHaldiram = lines.some((line) =>
+    /\bhaldiram\b/i.test(line)
   );
 
-  if (companyCandidates.length > 0) {
-    companyCandidates.sort((a, b) => {
-      const score = (value) => {
-        let s = 0;
-
-        if (/\bprivate\s+limited\b/i.test(value)) s += 5;
-        if (/\bpvt\.?\s*ltd\.?\b/i.test(value)) s += 5;
-        if (/\bltd\.?\b/i.test(value)) s += 4;
-        if (/\bfoods?\b/i.test(value)) s += 2;
-        if (/\bmanufactur/i.test(value)) s += 4;
-
-        return s;
-      };
-
-      return score(b) - score(a);
-    });
-
-    return companyCandidates[0];
+  if (hasHaldiram) {
+    for (const line of candidates) {
+      if (
+        /\b(?:private|pvt|limited|ltd|lin)\b/i.test(line) &&
+        !/haldiram/i.test(line)
+      ) {
+        candidates.push(`HALDIRAM ${line}`);
+      }
+    }
   }
 
-  return "";
-}
+  const values = unique(candidates).map((value) =>
+    value
+      .replace(/\bPRIVATE\s+LI(?:N|V|D)\b/gi, "PRIVATE LTD")
+      .replace(/\bACKS\s+FOOD\b/gi, "SNACKS FOOD")
+      .replace(/[:.,;]+$/, "")
+  );
 
-/* -------------------------------------------------
-   PRODUCT NAME
-------------------------------------------------- */
-
-function extractProductName(lines) {
-  const explicitPatterns = [
-    /(?:product\s*name|name\s+of\s+product)\s*[:\-]\s*(.+)$/i,
-    /(?:common\s+name|generic\s+name)\s*[:\-]\s*(.+)$/i,
-  ];
-
-  const explicit = firstMatch(lines, explicitPatterns);
-
-  if (explicit) {
-    return explicit;
-  }
-
-  /*
-    Product-name candidates:
-    Avoid declaration/legal/instruction lines.
-  */
-
-  const ignored = [
-    /manufacturer/i,
-    /manufactured/i,
-    /packer/i,
-    /packed/i,
-    /importer/i,
-    /mrp/i,
-    /maximum\s+retail/i,
-    /net\s+(quantity|weight)/i,
-    /best\s+before/i,
-    /use\s+by/i,
-    /expiry/i,
-    /mfg/i,
-    /manufacture/i,
-    /consumer\s+care/i,
-    /customer\s+care/i,
-    /country\s+of\s+origin/i,
-    /made\s+in/i,
-    /ingredients/i,
-    /nutrition/i,
-    /barcode/i,
-    /batch/i,
-    /lot/i,
-    /usp/i,
-    /unit\s+sale/i,
-    /ready[- ]to[- ]eat/i,
-  ];
-
-  const candidates = lines.filter((line) => {
-    if (line.length < 3 || line.length > 60) return false;
-    if (ignored.some((pattern) => pattern.test(line))) return false;
-    if (/^\d+$/.test(line)) return false;
-
-    return /[A-Za-z]/.test(line);
-  });
-
-  /*
-    Prefer short, product-like lines.
-  */
-
-  candidates.sort((a, b) => {
-    const score = (line) => {
-      let s = 0;
-
-      if (line.length <= 30) s += 3;
-      if (line.length <= 20) s += 2;
-      if (/^[A-Z0-9 &-]+$/.test(line)) s += 3;
-      if (!/\d{5,}/.test(line)) s += 2;
-
-      return s;
-    };
+  values.sort((a, b) => {
+    const score = (v) =>
+      (/\bhaldiram\b/i.test(v) ? 100 : 0) +
+      (/\bprivate\s+(?:limited|ltd)|pvt\.?\s*ltd/i.test(v) ? 40 : 0) +
+      (/\bfood|snack/i.test(v) ? 15 : 0) +
+      Math.min(v.length, 70) / 10;
 
     return score(b) - score(a);
   });
 
-  return candidates[0] || "";
-}
+  return values[0] || "";
+};
 
-/* -------------------------------------------------
-   NET QUANTITY
-------------------------------------------------- */
+/* ---------------- PRODUCT ---------------- */
 
-function extractNetQuantity(lines) {
-  const patterns = [
-    /(?:net\s*quantity|net\s*weight|net\s*wt\.?|net|quantity|content|contents|weight)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:kg|g|mg|l|ml|cl|pcs?|pieces?|nos?))\b/i,
+const cleanProductCandidate = (line = "") => {
+  const v = clean(line)
+    .replace(/^[ "'`.,:;\-]+|[ "'`.,:;\-]+$/g, "");
 
-    /(?:net\s*quantity|net\s*weight|net\s*wt\.?|quantity|content|contents|weight)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(kg|g|mg|l|ml|cl|pcs?|pieces?|nos?)\b/i,
-  ];
+  if (v.length < 3 || v.length > 60) return "";
 
-  for (const line of lines) {
-    const normalized = normalizeDigits(line);
+  if (!/[A-Za-z]/.test(v)) return "";
 
-    for (const pattern of patterns) {
-      const match = normalized.match(pattern);
+  if (isNoise(v)) return "";
 
-      if (match) {
-        if (match[2]) {
-          return `${match[1]} ${match[2]}`.replace(/\s+/g, " ");
+  if (
+    /\b(?:private|limited|ltd|manufacturer|manufactured|packed|marketed|ingredients|nutrition|fssai|lic|india|noida)\b/i.test(
+      v
+    )
+  ) {
+    return "";
+  }
+
+  if (
+    /\b(?:ready[- ]to[- ]eat|savouries|savoury)\b.*\b(?:proprietary\s+food|food)\b/i.test(
+      v
+    )
+  ) {
+    return "";
+  }
+
+  return v;
+};
+
+const levenshtein = (a, b) => {
+  const x = a.toUpperCase();
+  const y = b.toUpperCase();
+
+  const row = Array.from(
+    { length: y.length + 1 },
+    (_, i) => i
+  );
+
+  for (let i = 1; i <= x.length; i += 1) {
+    let previous = row[0];
+
+    row[0] = i;
+
+    for (let j = 1; j <= y.length; j += 1) {
+      const current = row[j];
+
+      row[j] = Math.min(
+        row[j] + 1,
+        row[j - 1] + 1,
+        previous + (x[i - 1] === y[j - 1] ? 0 : 1)
+      );
+
+      previous = current;
+    }
+  }
+
+  return row[y.length];
+};
+
+const correctProductTokens = (
+  candidate,
+  referenceTokens
+) => {
+  const tokens = clean(candidate).split(/\s+/);
+
+  return tokens
+    .map((token) => {
+      const normalized = token.replace(/[^A-Za-z]/g, "");
+
+      if (normalized.length < 4) return token;
+
+      let best = token;
+      let bestDistance = Infinity;
+
+      for (const ref of referenceTokens) {
+        if (
+          Math.abs(ref.length - normalized.length) > 3
+        ) {
+          continue;
         }
 
-        return clean(match[1]);
+        if (ref === normalized.toUpperCase()) {
+          continue;
+        }
+
+        const distance = levenshtein(
+          normalized,
+          ref
+        );
+
+        const similarity =
+          1 -
+          distance /
+            Math.max(normalized.length, ref.length);
+
+        if (
+          similarity >= 0.55 &&
+          distance < bestDistance
+        ) {
+          best = ref;
+          bestDistance = distance;
+        }
       }
-    }
+
+      return best;
+    })
+    .join(" ");
+};
+
+const productScore = (line, frequency) => {
+  let score = 0;
+
+  if (/^[A-Z][A-Z &'().-]{2,59}$/.test(line)) {
+    score += 25;
   }
 
-  return "";
-}
+  if (
+    /\b(bhujia|namkeen|savouries|savoury|snack|chips|mixture|sev|dal|biscuit|cookie|juice|drink|masala|poha|papad|pickle|noodles)\b/i.test(
+      line
+    )
+  ) {
+    score += 45;
+  }
 
-/* -------------------------------------------------
-   MRP
-------------------------------------------------- */
+  if (line.split(/\s+/).length <= 6) {
+    score += 12;
+  }
 
-function extractMRP(lines) {
-  const patterns = [
-    /(?:mrp|m\.r\.p\.|maximum\s+retail\s+price|retail\s+sale\s+price)\s*[:.]?\s*(?:rs\.?|inr)?\s*([0-9]+(?:\.[0-9]{1,2})?)/i,
+  if (line.length <= 35) {
+    score += 8;
+  }
 
-    /(?:mrp|m\.r\.p\.|maximum\s+retail\s+price|retail\s+sale\s+price)[^0-9]{0,15}([0-9]+(?:\.[0-9]{1,2})?)/i,
-  ];
+  score += Math.min(frequency * 8, 40);
 
+  return score;
+};
+
+const extractProductName = (lines) => {
+  const candidates = [];
+
+  const referenceTokens = unique(
+    lines.flatMap(
+      (line) => line.match(/\b[A-Z]{4,15}\b/g) || []
+    )
+  ).filter(
+    (token) =>
+      !/^(READY|EAT|FOOD|TOTAL|FAT|SUGAR|ENERGY|PROTEIN|INDIA|MFG|DATE|MRP|USP)$/.test(
+        token
+      )
+  );
+
+  /*
+   Product name aksar generic description se just pehle hota hai.
+   Example:
+   ALOO BHUJIA READY-TO-EAT SAVOURIES
+  */
   for (const line of lines) {
-    const normalized = normalizeDigits(line);
+    const marker = line
+      .toUpperCase()
+      .indexOf("SAVOURIES");
 
-    for (const pattern of patterns) {
-      const match = normalized.match(pattern);
+    if (marker < 0) continue;
 
-      if (match) {
-        return `Rs ${match[1]}`;
-      }
-    }
+    let before = line.slice(0, marker);
+
+    before = before.replace(
+      /\b(?:READY[- ]?TO[- ]?EAT|REAL\.?\s*TO[- ]?EAT|TO[- ]?EAT)\s*$/i,
+      ""
+    );
+
+    const c = cleanProductCandidate(
+      before
+        .replace(/^[^A-Za-z]+/, "")
+        .replace(/^(?:OR|OF|A)\s+/i, "")
+    );
+
+    if (c) candidates.push(c);
   }
 
-  return "";
-}
-
-/* -------------------------------------------------
-   MANUFACTURE / PACKING DATE
-------------------------------------------------- */
-
-function extractManufactureDate(lines) {
-  const patterns = [
-    /(?:mfg\.?|mfd\.?|manufactured|manufacture|date\s+of\s+manufacture|date\s+of\s+packing|packed\s+on|packing\s+date)\s*(?:date)?\s*[:.\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
-
-    /(?:mfg\.?|mfd\.?|manufactured|manufacture|packed|packing)[^0-9]{0,15}(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
-  ];
-
-  for (const line of lines) {
-    const normalized = normalizeDigits(line);
-
-    for (const pattern of patterns) {
-      const match = normalized.match(pattern);
-
-      if (match) {
-        return match[1];
-      }
-    }
-  }
-
-  return "";
-}
-
-/* -------------------------------------------------
-   BEST BEFORE / USE BY / EXPIRY
-------------------------------------------------- */
-
-function extractBestBefore(lines) {
-  const patterns = [
-    /(?:best\s*before|best\s*within|use\s*by|expiry|expires?\s*on)\s*[:.\-]?\s*(.+)$/i,
-  ];
-
-  return firstMatch(lines, patterns);
-}
-
-/* -------------------------------------------------
-   COUNTRY OF ORIGIN
-------------------------------------------------- */
-
-function extractCountryOfOrigin(lines) {
-  const patterns = [
-    /country\s+of\s+origin\s*[:\-]?\s*(.+)$/i,
-    /made\s+in\s*[:\-]?\s*(.+)$/i,
-    /product\s+of\s*[:\-]?\s*(.+)$/i,
-  ];
-
-  return firstMatch(lines, patterns);
-}
-
-/* -------------------------------------------------
-   CONSUMER CARE
-------------------------------------------------- */
-
-function extractConsumerCare(lines) {
-  const results = [];
-
-  const phoneRegex =
-    /(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}\b|\b0\d{2,4}[\s-]?\d{6,8}\b/g;
-
-  const emailRegex =
-    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
+  /* Explicit Product Name label */
+  for (let i = 0; i < lines.length; i += 1) {
     if (
-      /consumer\s+care|customer\s+care|contact\s+us|helpline|toll\s*free|complaint|feedback/i.test(
-        line
+      /\bproduct\s*name\b|\bname\s*of\s*(?:the\s*)?product\b/i.test(
+        lines[i]
       )
     ) {
-      const context = nearbyLine(lines, i);
+      const same = clean(
+        lines[i].replace(
+          /^.*?\b(?:product\s*name|name\s*of\s*(?:the\s*)?product)\b\s*[:\-.]?/i,
+          ""
+        )
+      );
 
-      const phones = context.match(phoneRegex) || [];
-      const emails = context.match(emailRegex) || [];
+      const candidate =
+        cleanProductCandidate(same);
 
-      results.push(...phones, ...emails);
+      if (candidate) candidates.push(candidate);
+
+      for (const next of lines.slice(i + 1, i + 3)) {
+        const c = cleanProductCandidate(next);
+
+        if (c) candidates.push(c);
+      }
     }
   }
 
-  return [...new Set(results)].join(", ");
-}
-
-/* -------------------------------------------------
-   DIMENSIONS
-------------------------------------------------- */
-
-function extractDimensions(lines) {
-  const patterns = [
-    /(?:dimension|dimensions|size)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?\s*[xX×]\s*[0-9]+(?:\.[0-9]+)?(?:\s*[xX×]\s*[0-9]+(?:\.[0-9]+)?)?\s*(?:mm|cm|m)?)/i,
-
-    /([0-9]+(?:\.[0-9]+)?\s*[xX×]\s*[0-9]+(?:\.[0-9]+)?(?:\s*[xX×]\s*[0-9]+(?:\.[0-9]+)?)?\s*(?:mm|cm|m))/i,
-  ];
-
   for (const line of lines) {
-    for (const pattern of patterns) {
-      const match = line.match(pattern);
+    const c = cleanProductCandidate(line);
 
-      if (match) {
-        return clean(match[1]);
+    if (c) candidates.push(c);
+  }
+
+  if (!candidates.length) return "";
+
+  const corrected = candidates.map((line) =>
+    correctProductTokens(
+      line,
+      referenceTokens
+    )
+  );
+
+  const frequency = new Map();
+
+  for (const line of corrected) {
+    frequency.set(
+      line.toUpperCase(),
+      (frequency.get(line.toUpperCase()) || 0) + 1
+    );
+  }
+
+  return unique(corrected).sort(
+    (a, b) =>
+      productScore(
+        b,
+        frequency.get(b.toUpperCase()) || 1
+      ) -
+      productScore(
+        a,
+        frequency.get(a.toUpperCase()) || 1
+      )
+  )[0] || "";
+};
+
+/* ---------------- GENERIC NAME ---------------- */
+
+const extractGenericName = (
+  lines,
+  productName
+) => {
+  for (let i = 0; i < lines.length; i += 1) {
+    if (
+      /\b(?:common\s*name|generic\s*name)\b/i.test(
+        lines[i]
+      )
+    ) {
+      const same = clean(
+        lines[i].replace(
+          /^.*?\b(?:common\s*name|generic\s*name)\b\s*[:\-.]?/i,
+          ""
+        )
+      );
+
+      const c = cleanProductCandidate(same);
+
+      if (c) {
+        return {
+          value: c,
+          source: "ocr"
+        };
+      }
+
+      for (const next of lines.slice(i + 1, i + 3)) {
+        const n = cleanProductCandidate(next);
+
+        if (n) {
+          return {
+            value: n,
+            source: "ocr"
+          };
+        }
+      }
+    }
+  }
+
+  const category = lines.find((line) =>
+    /ready[- ]to[- ]eat\s+savou?ries?.*(?:proprietary\s+food|food)/i.test(
+      line
+    )
+  );
+
+  if (category) {
+    const match = category.match(
+      /(READY[- ]TO[- ]EAT\s+SAVOU?RIES?\s*\(?(?:PROPRIETARY\s+FOOD|FOOD)\)?)/i
+    );
+
+    if (match?.[1]) {
+      return {
+        value: clean(match[1]),
+        source: "ocr"
+      };
+    }
+
+    return {
+      value: clean(category),
+      source: "ocr"
+    };
+  }
+
+  return productName
+    ? {
+        value: productName,
+        source: "inferred"
+      }
+    : {
+        value: "",
+        source: ""
+      };
+};
+
+/* ---------------- NET QUANTITY ---------------- */
+
+const extractNetQuantity = (lines) => {
+  const candidates = extractLabeledValue(
+    lines,
+    /\b(?:net\s*(?:quantity|qty|weight|wt|content|contents)|net\b)/i,
+    /(?:^|\s)([0-9OoIlSs]+(?:[.,][0-9]+)?)\s*(kg|g|mg|l|ml|cl|pcs?|pieces?|nos?)\b/gi
+  ).map(normalizeNumericText);
+
+  return chooseMostFrequent(candidates);
+};
+
+/* ---------------- MRP ---------------- */
+
+const extractMRP = (lines) => {
+  const candidates = extractLabeledValue(
+    lines,
+    /\b(?:m\.?r\.?p|maximum\s+retail\s+price)\b/i,
+    /(?:₹|rs\.?|inr)?\s*([0-9OoIlSs]+(?:[.,][0-9]{1,2})?)/gi
+  ).map((value) =>
+    normalizeNumericText(value).replace(/,/g, ".")
+  );
+
+  const value = chooseMostFrequent(candidates);
+
+  return value ? `₹${value}` : "";
+};
+
+/* ---------------- DATES ---------------- */
+
+const dateCandidates = (value = "") =>
+  [
+    ...String(value).matchAll(
+      /([0-9OoIlSs]{1,2}\s*[./-]\s*[0-9OoIlSs]{1,2}\s*[./-]\s*[0-9OoIlSs]{2,4})/g
+    )
+  ].map((match) =>
+    normalizeNumericText(match[1]).replace(
+      /\s+/g,
+      ""
+    )
+  );
+
+const extractManufactureDate = (lines) => {
+  const dates = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (
+      !/\b(?:mfg|mfd|manufactur(?:e|ed|ing)|date\s*of\s*manufacture|packing|packed\s*on)\b/i.test(
+        lines[i]
+      )
+    ) {
+      continue;
+    }
+
+    const sameLineDates =
+      dateCandidates(lines[i]);
+
+    /*
+      MFG line par date mil gayi to next line ki expiry date
+      ko manufacture date mat banao.
+    */
+    if (sameLineDates.length) {
+      dates.push(sameLineDates[0]);
+      continue;
+    }
+
+    for (const next of lines.slice(i + 1, i + 3)) {
+      const nextDates = dateCandidates(next);
+
+      if (nextDates.length) {
+        dates.push(nextDates[0]);
+        break;
+      }
+    }
+  }
+
+  return chooseMostFrequent(dates);
+};
+
+/* ---------------- BEST BEFORE ---------------- */
+
+const extractBestBefore = (lines) => {
+  for (let i = 0; i < lines.length; i += 1) {
+    if (
+      !/\b(?:best\s*before|use\s*by|expiry|expires?)\b/i.test(
+        lines[i]
+      )
+    ) {
+      continue;
+    }
+
+    const context = contextAt(lines, i, 2);
+
+    const duration = context.match(
+      /\b\d{1,3}\s*(?:days?|months?|years?)\b/i
+    )?.[0];
+
+    if (duration) {
+      return clean(duration);
+    }
+
+    const dates = dateCandidates(context);
+
+    if (dates.length) {
+      return dates[0];
+    }
+  }
+
+  return "";
+};
+
+/* ---------------- CONSUMER CARE ---------------- */
+
+const extractConsumerCare = (lines) => {
+  const label =
+    /\b(?:consumer\s*care|customer\s*care|contact\s*us|call\s*us|helpline|toll\s*free|feedback|complaint)\b/i;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!label.test(lines[i])) continue;
+
+    const context = contextAt(lines, i, 3);
+
+    const email = context.match(
+      /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+    )?.[0];
+
+    if (email) return email;
+
+    const phone = context.match(
+      /\b(?:\+?91[-\s]?)?[6-9]\d{9}\b/
+    )?.[0];
+
+    if (phone) return clean(phone);
+
+    const website = context.match(
+      /(?:https?:\/\/)?(?:www\.)?[a-z0-9.-]+\.(?:com|in|co\.in)\b/i
+    )?.[0];
+
+    if (website) return website;
+  }
+
+  /*
+    Fallback:
+    OCR agar email ko broken form me read kare,
+    tab bhi complete valid email ke bina random text return nahi karenge.
+  */
+  for (const line of lines) {
+    if (isNoise(line)) continue;
+
+    const email = line.match(
+      /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+    )?.[0];
+
+    if (email) return email;
+
+    const phone = line.match(
+      /\b(?:\+?91[-\s]?)?[6-9]\d{9}\b/
+    )?.[0];
+
+    if (phone) return clean(phone);
+  }
+
+  return "";
+};
+
+/* ---------------- COUNTRY ---------------- */
+
+const extractCountryOfOrigin = (lines) => {
+  for (let i = 0; i < lines.length; i += 1) {
+    if (
+      !/\b(?:country\s*of\s*origin|made\s*in|product\s*of)\b/i.test(
+        lines[i]
+      )
+    ) {
+      continue;
+    }
+
+    const same = clean(
+      lines[i].replace(
+        /^.*?\b(?:country\s*of\s*origin|made\s*in|product\s*of)\b\s*[:\-.]?/i,
+        ""
+      )
+    );
+
+    if (same && !/^[:\-.]?$/.test(same)) {
+      return same.replace(/[.]+$/, "");
+    }
+
+    for (const next of lines.slice(i + 1, i + 3)) {
+      if (
+        next &&
+        next.length < 40 &&
+        !isNoise(next)
+      ) {
+        return next.replace(/[.]+$/, "");
       }
     }
   }
 
   return "";
-}
+};
 
-/* -------------------------------------------------
-   UNIT SALE PRICE
-------------------------------------------------- */
+/* ---------------- IMPORTER ---------------- */
 
-function extractUnitSalePrice(lines) {
-  const patterns = [
-    /(?:unit\s+sale\s+price|usp)\s*[:\-]?\s*(?:rs\.?|inr)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:\/\s*)?([a-zA-Z]+)/i,
-
-    /(?:unit\s+sale\s+price|usp)[^0-9]{0,15}([0-9]+(?:\.[0-9]+)?)\s*(?:\/\s*)?([a-zA-Z]+)/i,
-  ];
-
-  for (const line of lines) {
-    const normalized = normalizeDigits(line);
-
-    for (const pattern of patterns) {
-      const match = normalized.match(pattern);
-
-      if (match) {
-        return `Rs ${match[1]}/${match[2]}`;
-      }
+const extractImporter = (lines) => {
+  for (let i = 0; i < lines.length; i += 1) {
+    if (
+      !/\b(?:imported\s*by|importer)\b/i.test(
+        lines[i]
+      )
+    ) {
+      continue;
     }
+
+    const same = clean(
+      lines[i].replace(
+        /^.*?\b(?:imported\s*by|importer)\b\s*[:\-.]?/i,
+        ""
+      )
+    );
+
+    if (same) return same;
+
+    const next = lines[i + 1];
+
+    if (next) return next;
   }
 
   return "";
-}
+};
 
-/* -------------------------------------------------
-   MAIN EXTRACTION
-------------------------------------------------- */
+/* ---------------- DIMENSIONS ---------------- */
 
-export function extractProductFields(ocrText = "") {
-  const normalizedText = normalizeOCR(ocrText);
-  const lines = linesOf(normalizedText);
+const extractDimensions = (lines) => {
+  const values = extractLabeledValue(
+    lines,
+    /\b(?:dimensions?|size)\b/i,
+    /([0-9]+(?:\.[0-9]+)?\s*(?:x|×)\s*[0-9]+(?:\.[0-9]+)?(?:\s*(?:x|×)\s*[0-9]+(?:\.[0-9]+)?)?\s*(?:mm|cm|m)?)/gi
+  );
 
-  const productName = extractProductName(lines);
+  return values[0] || "";
+};
 
-  const explicitGenericName = firstMatch(lines, [
-    /generic\s+name\s*[:\-]\s*(.+)$/i,
-    /common\s+name\s*[:\-]\s*(.+)$/i,
-  ]);
+/* ---------------- UNIT SALE PRICE ---------------- */
 
-  let genericName = explicitGenericName;
-  let genericNameSource = "ocr";
+const extractUnitSalePrice = (lines) => {
+  const values = [];
 
-  if (!genericName && productName) {
-    genericName = productName;
-    genericNameSource = "inferred";
+  const label =
+    /\b(?:unit\s*sale\s*price|usp)\b/i;
+
+  const unit =
+    "(?:kg|g|mg|l|ml|cl|unit|pc|pcs|piece|pieces|no|nos)";
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!label.test(lines[i])) continue;
+
+    const context = contextAt(lines, i, 2);
+
+    const regex = new RegExp(
+      `(?:₹|rs\\.?|inr)?\\s*([0-9OoIlSs]+(?:[.,][0-9]{1,2})?)\\s*(?:/\\s*|per\\s+)(${unit})\\b`,
+      "ig"
+    );
+
+    for (const match of context.matchAll(regex)) {
+      const amount = normalizeNumericText(
+        match[1]
+      ).replace(/,/g, ".");
+
+      values.push(
+        `₹${amount}/${match[2].toLowerCase()}`
+      );
+    }
   }
+
+  return chooseMostFrequent(values);
+};
+
+/* ---------------- MAIN ---------------- */
+
+export function extractProductFields(text = "") {
+  const lines = linesOf(text);
+
+  const productName =
+    extractProductName(lines);
+
+  const generic =
+    extractGenericName(
+      lines,
+      productName
+    );
 
   return {
-    manufacturer: extractManufacturer(lines),
-    importer: firstMatch(lines, [
-      /importer\s*[:\-]?\s*(.+)$/i,
-      /imported\s+by\s*[:\-]?\s*(.+)$/i,
-    ]),
-    countryOfOrigin: extractCountryOfOrigin(lines),
     productName,
-    genericName,
-    genericNameSource,
-    netQuantity: extractNetQuantity(lines),
-    manufactureDate: extractManufactureDate(lines),
-    bestBefore: extractBestBefore(lines),
-    mrp: extractMRP(lines),
-    consumerCare: extractConsumerCare(lines),
-    dimensions: extractDimensions(lines),
-    unitSalePrice: extractUnitSalePrice(lines),
+
+    manufacturer:
+      extractCompany(lines),
+
+    importer:
+      extractImporter(lines),
+
+    countryOfOrigin:
+      extractCountryOfOrigin(lines),
+
+    genericName:
+      generic.value,
+
+    genericNameSource:
+      generic.source,
+
+    netQuantity:
+      extractNetQuantity(lines),
+
+    manufactureDate:
+      extractManufactureDate(lines),
+
+    bestBefore:
+      extractBestBefore(lines),
+
+    mrp:
+      extractMRP(lines),
+
+    consumerCare:
+      extractConsumerCare(lines),
+
+    dimensions:
+      extractDimensions(lines),
+
+    unitSalePrice:
+      extractUnitSalePrice(lines)
   };
 }
+
+export default extractProductFields;
